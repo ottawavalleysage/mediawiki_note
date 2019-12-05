@@ -1,0 +1,157 @@
+###################################################
+#
+# Script to install:
+# - WikiMedia 1.31 (LTS)
+# - VisualEditor for 1.31
+# - MariaDB
+# - Parsoid
+# 
+# A lot of assumptions are used here, but the main
+# one is that I know what I am doing
+#
+###################################################
+
+yum -y update
+yum -y install mariadb-server mariadb
+
+systemctl start mariadb.service
+systemctl enable mariadb.service
+
+mysql_secure_installation
+
+yum -y install httpd
+
+systemctl start httpd.service
+
+systemctl enable httpd.service
+firewall-cmd --permanent --zone=public --add-service=http 
+firewall-cmd --permanent --zone=public --add-service=https
+firewall-cmd --reload
+
+rpm -Uvh http://rpms.remirepo.net/enterprise/remi-release-7.rpm
+
+yum -y install yum-utils
+
+yum-config-manager --enable remi-php72
+
+yum -y install php php-opcache
+
+yum -y install php-mysqlnd php-pdo
+
+yum -y install php-gd php-ldap php-odbc php-pear php-xml php-xmlrpc php-mbstring php-soap curl curl-devel
+
+systemctl restart httpd
+
+yum -y install git
+
+yum -y install composer
+
+git clone https://gerrit.wikimedia.org/r/p/mediawiki/core.git --branch REL1_31 /var/www/html/
+
+cd /var/www/html
+git submodule update --init
+composer update --no-dev
+
+cd extensions
+git clone https://gerrit.wikimedia.org/r/p/mediawiki/extensions/VisualEditor.git --branch REL1_31
+cd VisualEditor
+git submodule update --init
+
+yum -y install nodejs npm vim
+
+rm -rf /opt/parsoid
+mkdir -p /opt/parsoid
+git clone https://gerrit.wikimedia.org/r/p/mediawiki/services/parsoid /opt/parsoid
+cd /opt/parsoid
+git checkout tags/v0.8.0
+npm install
+
+cp localsettings.example.js localsettings.js
+
+sed -i 's/\/\/ parsoid/parsoid/' localsettings.js
+sed -i 's/\/\/\turi/   uri/' localsettings.js
+sed -i 's/\/\/ });/});/' localsettings.js
+
+
+cp config.example.yaml config.yaml
+
+sed -i 's/localhost\/w\/api.php/localhost\/api.php/' config.yaml
+
+cat <<EOF >/etc/systemd/system/parsoid.service
+
+[Unit]
+ Description=Mediawiki Parsoid web service on node.js
+ Documentation=http://www.mediawiki.org/wiki/Parsoid
+ Wants=local-fs.target network.target
+ After=local-fs.target network.target
+ 
+[Install]
+ WantedBy=multi-user.target
+ 
+[Service]
+ Type=simple
+ User=root
+ Group=root
+ WorkingDirectory=/opt/parsoid
+ ExecStart=/usr/bin/node /opt/parsoid/bin/server.js
+ KillMode=process
+ Restart=on-success
+ PrivateTmp=true
+ StandardOutput=syslog
+EOF
+
+systemctl daemon-reload
+systemctl start parsoid
+systemctl enable parsoid
+firewall-cmd --add-port=8000/tcp --permanent
+firewall-cmd --reload
+
+cat <<EOF >/var/www/html/add2LocalSettings
+wfLoadExtension( 'VisualEditor' );
+ 
+ // Enable by default for everybody
+ \$wgDefaultUserOptions['visualeditor-enable'] = 1;
+ 
+ // Optional: Set VisualEditor as the default for anonymous users
+ // otherwise they will have to switch to VE
+ // \$wgDefaultUserOptions['visualeditor-editor'] = "visualeditor";
+ 
+ // Don't allow users to disable it
+ \$wgHiddenPrefs[] = 'visualeditor-enable';
+ 
+ // OPTIONAL: Enable VisualEditor's experimental code features
+ #\$wgDefaultUserOptions['visualeditor-enable-experimental'] = 1;
+ 
+ 
+ \$wgVirtualRestConfig['modules']['parsoid'] = array(
+     // URL to the Parsoid instance
+     // Use port 8142 if you use the Debian package
+     'url' => 'http://localhost:8000',
+     // Parsoid "domain", see below (optional)
+     'domain' => 'localhost',
+     // Parsoid "prefix", see below (optional)
+     'prefix' => 'localhost'
+ );
+
+# Avoid parsoid permission issues
+
+if ( !isset( \$_SERVER['REMOTE_ADDR'] ) OR \$_SERVER['REMOTE_ADDR'] == '127.0.0.1) {
+	\$wgGroupPermissions['*']['read'] = true;
+	\$wgGroupPermissions['*']['edit'] = true;
+}
+
+EOF
+
+mysql -u root -p -t<<EOF
+  create database mediawikidb;
+  grant all privileges on mediawikidb.* to mediawiki@'localhost' identified by 'mypassword';
+  flush privileges;
+  exit;
+
+EOF
+
+echo ""
+echo "Finished..."
+echo "Go to the webpage and configure."
+echo "Do not forget the add2LocalSettings after they get uploaded."
+echo ""
